@@ -3,5 +3,6 @@ langgraph
 langchain
 langchain-groq
 scrapling
+curl_cffi
 tavily-python
 python-dotenv

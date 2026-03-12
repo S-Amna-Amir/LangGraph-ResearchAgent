@@ -3,6 +3,7 @@ langgraph
 langchain
 langchain-groq
 scrapling
+browserforge
 curl_cffi
 playwright
 tavily-python

@@ -4,5 +4,6 @@ langchain
 langchain-groq
 scrapling
 curl_cffi
+playwright
 tavily-python
 python-dotenv

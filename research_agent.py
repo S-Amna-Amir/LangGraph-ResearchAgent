@@ -52,15 +52,26 @@ Assistant: {memory['previous_answer']}
 """
 
     prompt = f"""
-You are a routing assistant.
+You are a routing assistant for an AI research system.
 
-Determine if the user question requires LIVE web research.
+Decide if the user question requires LIVE web research.
 
-Reply with only one word:
+Research is REQUIRED for:
+- current date or time
+- latest news
+- weather
+- sports results
+- stock prices
+- recent events
+- anything using words like:
+  "today", "latest", "current", "recent", "now"
+
+Reply with ONLY:
 
 YES
 or
 NO
+
 
 {memory_context}
 

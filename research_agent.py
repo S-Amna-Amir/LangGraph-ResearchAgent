@@ -1,5 +1,5 @@
 import os
-from typing import TypedDict, Optional, List
+from typing import TypedDict, Optional, List, Dict
 
 from scrapling import Fetcher
 from dotenv import load_dotenv
@@ -23,14 +23,68 @@ llm = ChatGroq(
 fetcher = Fetcher()
 
 
+# ------------------------------
+# State
+# ------------------------------
+
 class ResearchState(TypedDict):
     user_query: str
+    rewritten_query: Optional[str]
     needs_research: Optional[bool]
     tool_result: Optional[str]
     final_answer: Optional[str]
     sources: Optional[List[str]]
-    memory: dict
+    memory: List[Dict]
     decision_log: Optional[str]
+
+
+# ------------------------------
+# Helper: Format Memory
+# ------------------------------
+
+def format_memory(memory):
+
+    history = ""
+
+    for msg in memory[-6:]:
+        history += f"{msg['role']}: {msg['content']}\n"
+
+    return history
+
+
+# ------------------------------
+# Query Rewriter
+# ------------------------------
+
+def rewrite_query_node(state: ResearchState):
+
+    query = state["user_query"]
+    memory = state.get("memory", [])
+
+    history_text = format_memory(memory)
+
+    prompt = f"""
+Rewrite the user's question into a fully explicit search query.
+
+Use conversation context if needed.
+
+Conversation:
+{history_text}
+
+User question:
+{query}
+
+Rewritten search query:
+"""
+
+    response = llm.invoke(prompt)
+
+    rewritten = response.content.strip()
+
+    return {
+        **state,
+        "rewritten_query": rewritten
+    }
 
 
 # ------------------------------
@@ -40,40 +94,38 @@ class ResearchState(TypedDict):
 def decision_node(state: ResearchState):
 
     query = state["user_query"]
-    memory = state.get("memory", {})
+    memory = state.get("memory", [])
 
-    memory_context = ""
+    history_text = format_memory(memory)
 
-    if memory.get("previous_query"):
-        memory_context = f"""
-Previous conversation:
-User: {memory['previous_query']}
-Assistant: {memory['previous_answer']}
-"""
+    query_lower = query.lower()
+
+    realtime_keywords = [
+        "today",
+        "current",
+        "latest",
+        "recent",
+        "weather",
+        "news",
+        "now",
+        "score"
+    ]
+
+    if any(k in query_lower for k in realtime_keywords):
+
+        return {
+            **state,
+            "needs_research": True,
+            "decision_log": "🧠 Decision: Research required (keyword trigger)"
+        }
 
     prompt = f"""
-You are a routing assistant for an AI research system.
+Decide if the user question requires live web research.
 
-Decide if the user question requires LIVE web research.
+Answer only YES or NO.
 
-Research is REQUIRED for:
-- current date or time
-- latest news
-- weather
-- sports results
-- stock prices
-- recent events
-- anything using words like:
-  "today", "latest", "current", "recent", "now"
-
-Reply with ONLY:
-
-YES
-or
-NO
-
-
-{memory_context}
+Conversation history:
+{history_text}
 
 Question:
 {query}
@@ -85,29 +137,30 @@ Question:
 
     needs_research = decision.startswith("Y")
 
-    decision_log = "🧠 Decision: "
+    log = "🧠 Decision: "
 
     if needs_research:
-        decision_log += "Research required"
+        log += "Research required"
     else:
-        decision_log += "Answer from general knowledge"
+        log += "Answer from general knowledge"
 
     return {
         **state,
         "needs_research": needs_research,
-        "decision_log": decision_log
+        "decision_log": log
     }
 
 
 # ------------------------------
-# Research Node
+# Research Tool
 # ------------------------------
 
 def research_tool_node(state: ResearchState):
 
-    query = state["user_query"]
+    query = state.get("rewritten_query") or state["user_query"]
 
-    search_log = "🔎 Searching web...\n"
+    decision_log = state.get("decision_log", "")
+    decision_log += "\n🔎 Searching web...\n🌐 Scraping sources..."
 
     try:
 
@@ -118,8 +171,6 @@ def research_tool_node(state: ResearchState):
         )
 
         urls = [r["url"] for r in results["results"]]
-
-        scrape_log = "🌐 Scraping sources...\n"
 
         collected_text = []
 
@@ -149,7 +200,7 @@ def research_tool_node(state: ResearchState):
             **state,
             "tool_result": combined_text,
             "sources": urls,
-            "decision_log": state["decision_log"] + "\n" + search_log + scrape_log
+            "decision_log": decision_log
         }
 
     except Exception as exc:
@@ -158,7 +209,7 @@ def research_tool_node(state: ResearchState):
             **state,
             "tool_result": f"Research failed: {exc}",
             "sources": [],
-            "decision_log": state["decision_log"] + "\nResearch failed."
+            "decision_log": decision_log
         }
 
 
@@ -170,26 +221,20 @@ def response_node(state: ResearchState):
 
     query = state["user_query"]
     tool_result = state.get("tool_result")
-    memory = state.get("memory", {})
+    memory = state.get("memory", [])
     sources = state.get("sources", [])
 
-    memory_context = ""
-
-    if memory.get("previous_query"):
-        memory_context = f"""
-Previous conversation:
-User: {memory['previous_query']}
-Assistant: {memory['previous_answer']}
-"""
+    history_text = format_memory(memory)
 
     if tool_result:
 
         prompt = f"""
 You are a research assistant.
 
-Answer the question using the research content below.
+Use the research content below to answer the question.
 
-{memory_context}
+Conversation history:
+{history_text}
 
 Research content:
 {tool_result}
@@ -197,7 +242,7 @@ Research content:
 Question:
 {query}
 
-Provide a clear answer.
+Answer clearly.
 """
 
     else:
@@ -205,10 +250,13 @@ Provide a clear answer.
         prompt = f"""
 You are a helpful assistant.
 
-{memory_context}
+Conversation history:
+{history_text}
 
 Question:
 {query}
+
+Answer clearly.
 """
 
     response = llm.invoke(prompt)
@@ -220,10 +268,12 @@ Question:
         for s in sources:
             answer += f"- {s}\n"
 
-    updated_memory = {
-        "previous_query": query,
-        "previous_answer": answer
-    }
+    updated_memory = memory + [
+        {"role": "user", "content": query},
+        {"role": "assistant", "content": answer}
+    ]
+
+    updated_memory = updated_memory[-10:]
 
     return {
         **state,
@@ -239,13 +289,13 @@ Question:
 def route_after_decision(state):
 
     if state["needs_research"]:
-        return "research_tool"
+        return "rewrite_query"
 
     return "response"
 
 
 # ------------------------------
-# Build Graph
+# Graph Builder
 # ------------------------------
 
 def build_graph():
@@ -253,6 +303,7 @@ def build_graph():
     graph = StateGraph(ResearchState)
 
     graph.add_node("decision", decision_node)
+    graph.add_node("rewrite_query", rewrite_query_node)
     graph.add_node("research_tool", research_tool_node)
     graph.add_node("response", response_node)
 
@@ -262,13 +313,13 @@ def build_graph():
         "decision",
         route_after_decision,
         {
-            "research_tool": "research_tool",
+            "rewrite_query": "rewrite_query",
             "response": "response"
         }
     )
 
+    graph.add_edge("rewrite_query", "research_tool")
     graph.add_edge("research_tool", "response")
-
     graph.add_edge("response", END)
 
     return graph.compile()
@@ -278,13 +329,17 @@ agent = build_graph()
 
 
 # ------------------------------
-# Public function
+# Public Function
 # ------------------------------
 
-def ask_agent(query: str, memory: dict):
+def ask_agent(query: str, memory):
+
+    if memory is None:
+        memory = []
 
     initial_state = {
         "user_query": query,
+        "rewritten_query": None,
         "needs_research": None,
         "tool_result": None,
         "final_answer": None,

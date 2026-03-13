@@ -1,13 +1,9 @@
 """
 RAG Research Agent
 ==================
-Replaces web search / Scrapling with a local vector store built from
+Uses a local vector store built from
 uploaded PDF, DOCX, and Markdown files.
 
-Dependencies:
-    pip install langgraph langchain-groq langchain-core langchain-community \
-                python-dotenv faiss-cpu sentence-transformers \
-                pypdf python-docx
 """
 
 import os
@@ -28,15 +24,11 @@ llm = ChatGroq(
 )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# RAG  –  Vector store (module-level singleton, shared with app.py)
-# ══════════════════════════════════════════════════════════════════════════════
-
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-# Embedding model (runs locally, no API key needed)
+# Embedding model (runs locally)
 _embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
 # In-memory document store  { id -> {"text": ..., "source": ...} }
@@ -154,20 +146,16 @@ def ingest_file(file_bytes: bytes, filename: str) -> int:
         raise ValueError(f"Unsupported file type: .{ext}")
     return ingest_documents(chunks)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 # State
-# ══════════════════════════════════════════════════════════════════════════════
-
 class ResearchState(TypedDict):
-    user_query: str
-    rewritten_query: Optional[str]
-    needs_research: Optional[bool]
-    tool_result: Optional[str]            # retrieved RAG context
-    retrieved_sources: Optional[List[str]]
-    final_answer: Optional[str]
-    memory: List[Dict]
-    decision_log: Optional[str]
+    user_query: str                         # Current user question
+    rewritten_query: Optional[str]          # Query optimized for semantic search
+    needs_research: Optional[bool]          # Decision node output
+    tool_result: Optional[str]              # Retrieved chunks
+    retrieved_sources: Optional[List[str]]  # Document sources of most relevant chunks
+    final_answer: Optional[str]             # Agent's final response
+    memory: List[Dict]                      # List of previous conversation (last 6)
+    decision_log: Optional[str]             # The agent decisions shown to user 
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -44,10 +44,15 @@ class ResearchState(TypedDict):
 
 def format_memory(memory):
 
+    if not isinstance(memory, list):
+        return ""
+
     history = ""
 
     for msg in memory[-6:]:
-        history += f"{msg['role']}: {msg['content']}\n"
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        history += f"{role}: {content}\n"
 
     return history
 
@@ -333,6 +338,17 @@ agent = build_graph()
 # ------------------------------
 
 def ask_agent(query: str, memory):
+
+    # Convert old dict memory format to new list format
+    if isinstance(memory, dict):
+
+        if "previous_query" in memory:
+            memory = [
+                {"role": "user", "content": memory["previous_query"]},
+                {"role": "assistant", "content": memory["previous_answer"]}
+            ]
+        else:
+            memory = []
 
     if memory is None:
         memory = []

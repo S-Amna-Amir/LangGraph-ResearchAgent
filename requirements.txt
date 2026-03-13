@@ -2,9 +2,10 @@ streamlit
 langgraph
 langchain
 langchain-groq
-scrapling
 browserforge
 curl_cffi
 playwright
-tavily-python
 python-dotenv
+faiss-cpu
+sentence-transformers
+pypdf

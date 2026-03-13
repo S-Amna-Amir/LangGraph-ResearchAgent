@@ -14,12 +14,10 @@ if "memory" not in st.session_state:
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# Display history
 for role, message in st.session_state.chat_history:
     with st.chat_message(role):
         st.write(message)
 
-# Chat input
 user_input = st.chat_input("Ask a question...")
 
 if user_input:
@@ -29,7 +27,7 @@ if user_input:
     with st.chat_message("user"):
         st.write(user_input)
 
-    answer, updated_memory = ask_agent(
+    answer, updated_memory, decision_log = ask_agent(
         user_input,
         st.session_state.memory
     )
@@ -37,6 +35,10 @@ if user_input:
     st.session_state.memory = updated_memory
 
     with st.chat_message("assistant"):
+
+        with st.expander("Agent reasoning"):
+            st.write(decision_log)
+
         st.write(answer)
 
     st.session_state.chat_history.append(("assistant", answer))

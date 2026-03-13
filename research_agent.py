@@ -1,5 +1,5 @@
 import os
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, List
 
 from scrapling import Fetcher
 from dotenv import load_dotenv
@@ -28,79 +28,87 @@ class ResearchState(TypedDict):
     needs_research: Optional[bool]
     tool_result: Optional[str]
     final_answer: Optional[str]
+    sources: Optional[List[str]]
     memory: dict
+    decision_log: Optional[str]
 
 
 # ------------------------------
 # Decision Node
 # ------------------------------
 
-def decision_node(state: ResearchState) -> ResearchState:
+def decision_node(state: ResearchState):
 
     query = state["user_query"]
     memory = state.get("memory", {})
 
     memory_context = ""
+
     if memory.get("previous_query"):
-        memory_context = (
-            f"\nPrevious turn:\n"
-            f"User: {memory['previous_query']}\n"
-            f"Assistant: {memory['previous_answer']}"
-        )
+        memory_context = f"""
+Previous conversation:
+User: {memory['previous_query']}
+Assistant: {memory['previous_answer']}
+"""
 
     prompt = f"""
 You are a routing assistant.
 
-Determine if the question requires live web research.
+Determine if the user question requires LIVE web research.
 
-Reply with exactly ONE word:
-YES or NO.
+Reply with only one word:
 
-YES = web research needed
-NO = general knowledge is enough.
+YES
+or
+NO
 
 {memory_context}
 
-Question: {query}
-Answer:
+Question:
+{query}
 """
 
     response = llm.invoke(prompt)
-    answer = response.content.strip().upper()
 
-    needs_research = answer.startswith("Y")
+    decision = response.content.strip().upper()
 
-    return {**state, "needs_research": needs_research}
+    needs_research = decision.startswith("Y")
+
+    decision_log = "🧠 Decision: "
+
+    if needs_research:
+        decision_log += "Research required"
+    else:
+        decision_log += "Answer from general knowledge"
+
+    return {
+        **state,
+        "needs_research": needs_research,
+        "decision_log": decision_log
+    }
 
 
 # ------------------------------
-# Research Tool Node
+# Research Node
 # ------------------------------
 
-def research_tool_node(state: ResearchState) -> ResearchState:
+def research_tool_node(state: ResearchState):
 
     query = state["user_query"]
 
+    search_log = "🔎 Searching web...\n"
+
     try:
 
-        search_results = tavily.search(
+        results = tavily.search(
             query=query,
-            search_depth="basic",
-            max_results=3
+            max_results=3,
+            search_depth="basic"
         )
 
-        preferred_domains = [
-            ".org",
-            ".edu",
-            "docs.",
-            "developer.",
-            "official"
-        ]
+        urls = [r["url"] for r in results["results"]]
 
-        urls = [
-            r["url"] for r in search_results["results"]
-            if any(p in r["url"] for p in preferred_domains)
-        ] or [r["url"] for r in search_results["results"]]
+        scrape_log = "🌐 Scraping sources...\n"
 
         collected_text = []
 
@@ -119,53 +127,66 @@ def research_tool_node(state: ResearchState) -> ResearchState:
             except Exception:
                 continue
 
-        tool_result = "\n\n".join(collected_text)
+        combined_text = "\n\n".join(collected_text)
 
-        if not tool_result:
-            tool_result = "No useful web content retrieved."
+        if not combined_text:
+            combined_text = "No useful web content retrieved."
 
-        tool_result = tool_result[:4000]
+        combined_text = combined_text[:4000]
+
+        return {
+            **state,
+            "tool_result": combined_text,
+            "sources": urls,
+            "decision_log": state["decision_log"] + "\n" + search_log + scrape_log
+        }
 
     except Exception as exc:
-        tool_result = f"[Research failed: {exc}]"
 
-    return {**state, "tool_result": tool_result}
+        return {
+            **state,
+            "tool_result": f"Research failed: {exc}",
+            "sources": [],
+            "decision_log": state["decision_log"] + "\nResearch failed."
+        }
 
 
 # ------------------------------
 # Response Node
 # ------------------------------
 
-def response_node(state: ResearchState) -> ResearchState:
+def response_node(state: ResearchState):
 
     query = state["user_query"]
     tool_result = state.get("tool_result")
     memory = state.get("memory", {})
+    sources = state.get("sources", [])
 
     memory_context = ""
+
     if memory.get("previous_query"):
-        memory_context = (
-            f"\nPrevious conversation:\n"
-            f"User: {memory['previous_query']}\n"
-            f"Assistant: {memory['previous_answer']}"
-        )
+        memory_context = f"""
+Previous conversation:
+User: {memory['previous_query']}
+Assistant: {memory['previous_answer']}
+"""
 
     if tool_result:
 
         prompt = f"""
-You are a helpful research assistant.
+You are a research assistant.
 
-Use the research content below to answer the user's question.
+Answer the question using the research content below.
 
 {memory_context}
 
---- WEB RESEARCH CONTENT ---
+Research content:
 {tool_result}
-----------------------------
 
-Question: {query}
+Question:
+{query}
 
-Answer clearly and concisely.
+Provide a clear answer.
 """
 
     else:
@@ -175,41 +196,45 @@ You are a helpful assistant.
 
 {memory_context}
 
-Question: {query}
-
-Answer clearly.
+Question:
+{query}
 """
 
     response = llm.invoke(prompt)
 
-    final_answer = response.content.strip()
+    answer = response.content.strip()
+
+    if sources:
+        answer += "\n\nSources:\n"
+        for s in sources:
+            answer += f"- {s}\n"
 
     updated_memory = {
         "previous_query": query,
-        "previous_answer": final_answer,
+        "previous_answer": answer
     }
 
     return {
         **state,
-        "final_answer": final_answer,
+        "final_answer": answer,
         "memory": updated_memory
     }
 
 
 # ------------------------------
-# Routing
+# Router
 # ------------------------------
 
-def route_after_decision(state: ResearchState):
+def route_after_decision(state):
 
-    if state.get("needs_research"):
+    if state["needs_research"]:
         return "research_tool"
 
     return "response"
 
 
 # ------------------------------
-# Graph Builder
+# Build Graph
 # ------------------------------
 
 def build_graph():
@@ -232,27 +257,35 @@ def build_graph():
     )
 
     graph.add_edge("research_tool", "response")
+
     graph.add_edge("response", END)
 
     return graph.compile()
 
 
+agent = build_graph()
+
+
 # ------------------------------
-# Public function for UI
+# Public function
 # ------------------------------
 
 def ask_agent(query: str, memory: dict):
 
-    agent = build_graph()
-
-    initial_state: ResearchState = {
+    initial_state = {
         "user_query": query,
         "needs_research": None,
         "tool_result": None,
         "final_answer": None,
+        "sources": [],
         "memory": memory,
+        "decision_log": ""
     }
 
     result = agent.invoke(initial_state)
 
-    return result["final_answer"], result["memory"]
+    return (
+        result["final_answer"],
+        result["memory"],
+        result["decision_log"]
+    )

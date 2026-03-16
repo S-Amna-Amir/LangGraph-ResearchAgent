@@ -195,7 +195,7 @@ The user has uploaded documents which may contain the answer.
 
 If there is ANY chance the documents contain relevant information,
 you MUST answer YES.
-
+Also, if the query is vague, or lacks context, answer YES.
 Only answer NO if the question is clearly unrelated to the uploaded documents.
 
 Conversation history:

@@ -191,10 +191,12 @@ def decision_node(state: ResearchState) -> ResearchState:
 
     prompt = f"""You are a routing assistant.
 
-The user has uploaded documents. Decide whether the question below is best answered 
-by searching those documents (YES) or from general knowledge / conversation context (NO).
+The user has uploaded documents which may contain the answer.
 
-Answer only YES or NO.
+If there is ANY chance the documents contain relevant information,
+you MUST answer YES.
+
+Only answer NO if the question is clearly unrelated to the uploaded documents.
 
 Conversation history:
 {history_text}

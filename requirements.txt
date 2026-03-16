@@ -2,9 +2,6 @@ streamlit
 langgraph
 langchain
 langchain-groq
-browserforge
-curl_cffi
-playwright
 python-dotenv
 faiss-cpu
 sentence-transformers

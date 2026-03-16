@@ -9,3 +9,4 @@ python-dotenv
 faiss-cpu
 sentence-transformers
 pypdf
+python-docx

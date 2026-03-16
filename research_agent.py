@@ -333,7 +333,7 @@ def response_node(state: ResearchState):
         prompt = f"""
 You are a research assistant.
 
-Use the document excerpts to answer the question.
+Use the document excerpts to answer the question. If the user asks you to answer from one specific document, answer from it ONLY.
 
 Conversation:
 {history_text}

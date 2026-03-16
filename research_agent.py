@@ -3,7 +3,6 @@ RAG Research Agent
 ==================
 Uses a local vector store built from
 uploaded PDF, DOCX, and Markdown files.
-
 """
 
 import os
@@ -23,18 +22,15 @@ llm = ChatGroq(
     api_key=GROQ_API_KEY,
 )
 
-
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-# Embedding model (runs locally)
 _embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-# In-memory document store  { id -> {"text": ..., "source": ...} }
 _doc_store: Dict[int, dict] = {}
 _faiss_index: Optional[faiss.IndexFlatL2] = None
-_dim = 384   # dimension for all-MiniLM-L6-v2
+_dim = 384
 
 
 def _get_index() -> faiss.IndexFlatL2:
@@ -44,16 +40,17 @@ def _get_index() -> faiss.IndexFlatL2:
     return _faiss_index
 
 
+# ─────────────────────────────────────────────────────────
+# DOCUMENT INGESTION
+# ─────────────────────────────────────────────────────────
+
 def ingest_documents(chunks: List[Dict]) -> int:
-    """
-    Add document chunks to the vector store.
-    Each chunk must be: {"text": str, "source": str}
-    Returns the number of chunks added.
-    """
+
     if not chunks:
         return 0
 
     index = _get_index()
+
     texts = [c["text"] for c in chunks]
     embeddings = _embedder.encode(texts, show_progress_bar=False).astype("float32")
 
@@ -66,27 +63,36 @@ def ingest_documents(chunks: List[Dict]) -> int:
     return len(chunks)
 
 
-def retrieve(query: str, top_k: int = 4) -> List[Dict]:
-    """Return the top-k most relevant chunks for query. Returns [] if index is empty."""
+def retrieve(query: str, top_k: int = 6) -> List[Dict]:
+
     index = _get_index()
+
     if index.ntotal == 0:
         return []
 
     query_vec = _embedder.encode([query], show_progress_bar=False).astype("float32")
+
     k = min(top_k, index.ntotal)
     distances, ids = index.search(query_vec, k)
 
     results = []
+
     for dist, doc_id in zip(distances[0], ids[0]):
+
         if doc_id == -1:
             continue
+
         chunk = _doc_store[int(doc_id)]
-        results.append({**chunk, "score": float(dist)})
+
+        results.append({
+            **chunk,
+            "score": float(dist)
+        })
+
     return results
 
 
 def reset_index() -> None:
-    """Clear all ingested documents (called when user clears/re-uploads files)."""
     global _faiss_index, _doc_store
     _faiss_index = None
     _doc_store = {}
@@ -96,154 +102,206 @@ def index_size() -> int:
     return _get_index().ntotal
 
 
-# ── Document parsers ──────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# TEXT CHUNKING
+# ─────────────────────────────────────────────────────────
 
-def _chunk_text(text: str, source: str, chunk_size: int = 500, overlap: int = 80) -> List[Dict]:
-    """Split text into overlapping word-level chunks."""
+def _chunk_text(text: str, source: str, chunk_size: int = 500, overlap: int = 80):
+
     words = text.split()
+
     chunks = []
     start = 0
+
     while start < len(words):
+
         end = start + chunk_size
-        chunk_text = " ".join(words[start:end])
-        chunks.append({"text": chunk_text, "source": source})
+
+        chunk_body = " ".join(words[start:end])
+
+        # INCLUDE FILENAME IN EMBEDDING TEXT
+        chunk_text = f"Source Document: {source}\n\n{chunk_body}"
+
+        chunks.append({
+            "text": chunk_text,
+            "source": source
+        })
+
         start += chunk_size - overlap
+
     return chunks
 
 
-def parse_pdf(file_bytes: bytes, filename: str) -> List[Dict]:
+# ─────────────────────────────────────────────────────────
+# FILE PARSERS
+# ─────────────────────────────────────────────────────────
+
+def parse_pdf(file_bytes: bytes, filename: str):
+
     from pypdf import PdfReader
     import io
+
     reader = PdfReader(io.BytesIO(file_bytes))
-    pages_text = [page.extract_text() or "" for page in reader.pages]
+
+    pages_text = [
+        page.extract_text() or ""
+        for page in reader.pages
+    ]
+
     full_text = "\n".join(pages_text)
-    return _chunk_text(full_text, source=filename)
+
+    return _chunk_text(full_text, filename)
 
 
-def parse_docx(file_bytes: bytes, filename: str) -> List[Dict]:
+def parse_docx(file_bytes: bytes, filename: str):
+
     from docx import Document
     import io
+
     doc = Document(io.BytesIO(file_bytes))
-    full_text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-    return _chunk_text(full_text, source=filename)
+
+    full_text = "\n".join(
+        p.text for p in doc.paragraphs if p.text.strip()
+    )
+
+    return _chunk_text(full_text, filename)
 
 
-def parse_md(file_bytes: bytes, filename: str) -> List[Dict]:
+def parse_md(file_bytes: bytes, filename: str):
+
     full_text = file_bytes.decode("utf-8", errors="replace")
-    return _chunk_text(full_text, source=filename)
+
+    return _chunk_text(full_text, filename)
 
 
-def ingest_file(file_bytes: bytes, filename: str) -> int:
-    """Auto-detect file type, parse, chunk, and ingest. Returns chunk count."""
+def ingest_file(file_bytes: bytes, filename: str):
+
     ext = filename.lower().rsplit(".", 1)[-1]
+
     if ext == "pdf":
         chunks = parse_pdf(file_bytes, filename)
+
     elif ext == "docx":
         chunks = parse_docx(file_bytes, filename)
+
     elif ext in ("md", "markdown", "txt"):
         chunks = parse_md(file_bytes, filename)
+
     else:
         raise ValueError(f"Unsupported file type: .{ext}")
+
     return ingest_documents(chunks)
 
-# State
+
+# ─────────────────────────────────────────────────────────
+# STATE
+# ─────────────────────────────────────────────────────────
+
 class ResearchState(TypedDict):
-    user_query: str                         # Current user question
-    rewritten_query: Optional[str]          # Query optimized for semantic search
-    needs_research: Optional[bool]          # Decision node output
-    tool_result: Optional[str]              # Retrieved chunks
-    retrieved_sources: Optional[List[str]]  # Document sources of most relevant chunks
-    final_answer: Optional[str]             # Agent's final response
-    memory: List[Dict]                      # List of previous conversation (last 6)
-    decision_log: Optional[str]             # The agent decisions shown to user 
+
+    user_query: str
+    rewritten_query: Optional[str]
+    needs_research: Optional[bool]
+    tool_result: Optional[str]
+    retrieved_sources: Optional[List[str]]
+    final_answer: Optional[str]
+    memory: List[Dict]
+    decision_log: Optional[str]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Helpers
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────
 
-def format_memory(memory: List[Dict]) -> str:
+def format_memory(memory: List[Dict]):
+
     if not isinstance(memory, list):
         return ""
+
     history = ""
+
     for msg in memory[-6:]:
-        history += f"{msg.get('role', '')}: {msg.get('content', '')}\n"
+
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+
+        history += f"{role}: {content}\n"
+
     return history
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Nodes
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────
+# NODES
+# ─────────────────────────────────────────────────────────
 
-def decision_node(state: ResearchState) -> ResearchState:
-    """Decide whether to retrieve from uploaded documents or answer from general knowledge."""
-    query = state["user_query"]
-    memory = state.get("memory", [])
-    history_text = format_memory(memory)
+def decision_node(state: ResearchState):
 
-    # If no documents have been ingested, skip RAG entirely
     if index_size() == 0:
+
         return {
             **state,
             "needs_research": False,
-            "decision_log": "⚠️ No documents uploaded — answering from general knowledge.",
+            "decision_log": "⚠️ No documents uploaded — answering from general knowledge."
         }
 
-    prompt = f"""You are a routing assistant.
-
-The user has uploaded documents which may contain the answer.
-
-If there is ANY chance the documents contain relevant information,
-you MUST answer YES.
-Also, if the query is vague, or lacks context, answer YES.
-Only answer NO if the question is clearly unrelated to the uploaded documents.
-
-Conversation history:
-{history_text}
-
-Question: {query}
-"""
-
-    response = llm.invoke(prompt)
-    needs_research = response.content.strip().upper().startswith("Y")
-
-    log = "🧠 Decision: " + ("Search uploaded documents" if needs_research else "Answer from general knowledge")
-    return {**state, "needs_research": needs_research, "decision_log": log}
+    return {
+        **state,
+        "needs_research": True,
+        "decision_log": "🧠 Documents detected — retrieving relevant sections."
+    }
 
 
-def rewrite_query_node(state: ResearchState) -> ResearchState:
-    """Rewrite the query into a standalone form suitable for semantic search."""
+def rewrite_query_node(state: ResearchState):
+
     query = state["user_query"]
+
     history_text = format_memory(state.get("memory", []))
 
-    prompt = f"""Rewrite the user's question into a standalone, explicit search query 
-suitable for semantic search over documents. Use conversation context if needed.
+    prompt = f"""
+Rewrite the user's question into a standalone search query.
 
 Conversation:
 {history_text}
 
-User question: {query}
+Question:
+{query}
 
-Rewritten search query:"""
+Search query:
+"""
 
     response = llm.invoke(prompt)
-    return {**state, "rewritten_query": response.content.strip()}
+
+    return {
+        **state,
+        "rewritten_query": response.content.strip()
+    }
 
 
-def rag_retrieval_node(state: ResearchState) -> ResearchState:
-    """Retrieve the most relevant chunks from the vector store."""
+def rag_retrieval_node(state: ResearchState):
+
     query = state.get("rewritten_query") or state["user_query"]
-    decision_log = state.get("decision_log", "") + "\n🔎 Retrieving from documents..."
 
-    chunks = retrieve(query, top_k=4)
+    decision_log = state.get("decision_log", "")
+    decision_log += "\n🔎 Retrieving from documents..."
+
+    chunks = retrieve(query, top_k=6)
 
     if not chunks:
-        tool_result = "No relevant content found in the uploaded documents."
+
+        tool_result = "No relevant content found in uploaded documents."
         sources = []
+
     else:
-        tool_result = "\n\n---\n\n".join(c["text"] for c in chunks)
-        seen, sources = set(), []
+
+        tool_result = "\n\n---\n\n".join(
+            c["text"] for c in chunks
+        )
+
+        seen = set()
+        sources = []
+
         for c in chunks:
+
             if c["source"] not in seen:
                 seen.add(c["source"])
                 sources.append(c["source"])
@@ -254,66 +312,87 @@ def rag_retrieval_node(state: ResearchState) -> ResearchState:
         **state,
         "tool_result": tool_result,
         "retrieved_sources": sources,
-        "decision_log": decision_log,
+        "decision_log": decision_log
     }
 
 
-def response_node(state: ResearchState) -> ResearchState:
-    """Generate the final answer from RAG context or general knowledge."""
+def response_node(state: ResearchState):
+
     query = state["user_query"]
+
     tool_result = state.get("tool_result")
+
     memory = state.get("memory", [])
+
     sources = state.get("retrieved_sources", [])
+
     history_text = format_memory(memory)
 
     if tool_result:
-        prompt = f"""You are a research assistant answering questions based on provided documents.
 
-Use the document excerpts below to answer the question. If the excerpts don't contain 
-enough information, say so and supplement with general knowledge where appropriate.
+        prompt = f"""
+You are a research assistant.
 
-Conversation history:
+Use the document excerpts to answer the question.
+
+Conversation:
 {history_text}
 
-Document excerpts:
+Documents:
 {tool_result}
 
-Question: {query}
+Question:
+{query}
 
-Answer clearly and concisely:"""
+Answer clearly:
+"""
+
     else:
-        prompt = f"""You are a helpful assistant.
 
-Conversation history:
+        prompt = f"""
+You are a helpful assistant.
+
+Conversation:
 {history_text}
 
-Question: {query}
+Question:
+{query}
 
-Answer clearly and concisely:"""
+Answer clearly:
+"""
 
     response = llm.invoke(prompt)
+
     answer = response.content.strip()
 
     if sources:
-        answer += "\n\n**Sources:**\n" + "\n".join(f"- {s}" for s in sources)
 
-    updated_memory = (memory + [
-        {"role": "user", "content": query},
-        {"role": "assistant", "content": answer},
-    ])[-10:]
+        answer += "\n\n**Sources:**\n"
 
-    return {**state, "final_answer": answer, "memory": updated_memory}
+        for s in sources:
+            answer += f"- {s}\n"
+
+    updated_memory = (
+        memory
+        + [
+            {"role": "user", "content": query},
+            {"role": "assistant", "content": answer},
+        ]
+    )[-10:]
+
+    return {
+        **state,
+        "final_answer": answer,
+        "memory": updated_memory
+    }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Router + Graph
-# ══════════════════════════════════════════════════════════════════════════════
-
-def route_after_decision(state: ResearchState) -> str:
-    return "rewrite_query" if state["needs_research"] else "response"
-
+# ─────────────────────────────────────────────────────────
+# GRAPH
+# ─────────────────────────────────────────────────────────
 
 def build_graph():
+
     graph = StateGraph(ResearchState)
 
     graph.add_node("decision", decision_node)
@@ -323,15 +402,7 @@ def build_graph():
 
     graph.set_entry_point("decision")
 
-    graph.add_conditional_edges(
-        "decision",
-        route_after_decision,
-        {
-            "rewrite_query": "rewrite_query",
-            "response": "response",
-        },
-    )
-
+    graph.add_edge("decision", "rewrite_query")
     graph.add_edge("rewrite_query", "rag_retrieval")
     graph.add_edge("rag_retrieval", "response")
     graph.add_edge("response", END)
@@ -342,24 +413,17 @@ def build_graph():
 agent = build_graph()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Public API  (called by app.py)
-# ══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────
+# PUBLIC API
+# ─────────────────────────────────────────────────────────
 
 def ask_agent(query: str, memory):
-    if isinstance(memory, dict):
-        if "previous_query" in memory:
-            memory = [
-                {"role": "user", "content": memory["previous_query"]},
-                {"role": "assistant", "content": memory["previous_answer"]},
-            ]
-        else:
-            memory = []
 
     if memory is None:
         memory = []
 
     initial_state: ResearchState = {
+
         "user_query": query,
         "rewritten_query": None,
         "needs_research": None,
@@ -367,7 +431,7 @@ def ask_agent(query: str, memory):
         "retrieved_sources": [],
         "final_answer": None,
         "memory": memory,
-        "decision_log": "",
+        "decision_log": ""
     }
 
     result = agent.invoke(initial_state)
